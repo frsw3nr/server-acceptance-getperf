@@ -1,0 +1,24 @@
+Param(
+    [string]\$log_dir
+  , [string]\$vm
+  , [string]\$server
+  , [string]\$vcenter
+  , [string]\$user
+  , [string]\$password
+)
+\$ErrorActionPreference = "Stop"
+try {
+    Add-PSSnapin VMware.VimAutomation.Core
+    Connect-VIServer -User \$user -Password \$password -Server \$vcenter
+} catch [Exception] {
+    Write-Error "\$error"
+    exit 1
+}
+\$ErrorActionPreference = "Continue"
+<%
+commands.each { command ->
+%>\
+<%= command.line %> | Out-File "\$log_dir/<%= command.test_id %>" -Encoding UTF8
+<%
+}
+%>\
