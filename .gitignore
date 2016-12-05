@@ -4,6 +4,7 @@
 *.jar
 *.war
 *.ear
+*_Getperf_*.xlsx
 .mtj.tmp/
 /build/
 /libdeps/
