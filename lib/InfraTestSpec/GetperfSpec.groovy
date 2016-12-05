@@ -6,9 +6,31 @@ import org.hidetake.groovy.ssh.Ssh
 import jp.co.toshiba.ITInfra.acceptance.InfraTestSpec.*
 import jp.co.toshiba.ITInfra.acceptance.*
 
+
 @Slf4j
 @InheritConstructors
 class GetperfSpec extends LinuxSpecBase {
+
+    @Singleton
+    class InfraEvidence {
+        def site_homes = [:].withDefault{[:]}
+
+        def get_site_homes(session) {
+            if (! site_homes.containsKey(this.ip)) {
+                def lines_site_home = exec('site_home') {
+                    def command = "grep -H home /home/psadmin/getperf/config/site/*"
+                    run_ssh_command(session, command, 'site_home')
+                }
+                lines_site_home.eachLine {
+                    ( it =~ /\/site\/(.+?)\.json:\s+"home":\s+"(.+?)"/).each {
+                        m0, sitekey, site_home ->
+                        site_homes[this.ip][sitekey] = site_home
+                    }
+                }
+            }
+            return site_homes[this.ip]
+        }
+    }
 
     String agent
     int    timeout = 30
@@ -17,7 +39,6 @@ class GetperfSpec extends LinuxSpecBase {
         super.init()
         def remote_account = test_server.remote_account
         this.agent = test_server.remote_alias
-        // timeout          = test_server.timeout
     }
 
     def finish() {
@@ -59,11 +80,21 @@ class GetperfSpec extends LinuxSpecBase {
         def last_transfer_dates = [:]
         def csv = []
         site_homes.each { sitekey, site_home ->
-            def log_file = "ls_analysis_${sitekey}"
+            def log_id   = "ls_analysis_${sitekey}"
+            def log_file = "${work_dir}/${log_id}"
             def lines = exec(log_file) {
-                def host_dir = (this.agent) ?: '*'
-                def command = "ls ${site_home}/analysis/${host_dir}/*/* -d"
-                run_ssh_command(session, command, log_file)
+                def host_dir1 = (this.agent) ?: ''
+                def host_dir2 = (this.agent) ?: '*'
+                def command = """\
+                    |if [ -d ${site_home}/analysis/${host_dir1} ]; then
+                    |   ls ${site_home}/analysis/${host_dir2}/*/* -d
+                    |fi
+                """.stripMargin()
+print command
+                def res = session.execute command
+print res
+                // session.get from: log_file, into: local_dir, ignoreError: true
+                new File("${local_dir}/${log_id}").text = res
             }
             lines.eachLine { line->
                 ( line =~ /\/analysis\/(.+?)\/(.+?)\/(.+?)$/ ).each {
