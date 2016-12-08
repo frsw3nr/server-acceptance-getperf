@@ -11,29 +11,9 @@ import jp.co.toshiba.ITInfra.acceptance.*
 @InheritConstructors
 class GetperfSpec extends LinuxSpecBase {
 
-    @Singleton
-    class InfraEvidence {
-        def site_homes = [:].withDefault{[:]}
-
-        def get_site_homes(session) {
-            if (! site_homes.containsKey(this.ip)) {
-                def lines_site_home = exec('site_home') {
-                    def command = "grep -H home /home/psadmin/getperf/config/site/*"
-                    run_ssh_command(session, command, 'site_home')
-                }
-                lines_site_home.eachLine {
-                    ( it =~ /\/site\/(.+?)\.json:\s+"home":\s+"(.+?)"/).each {
-                        m0, sitekey, site_home ->
-                        site_homes[this.ip][sitekey] = site_home
-                    }
-                }
-            }
-            return site_homes[this.ip]
-        }
-    }
-
     String agent
     int    timeout = 30
+    def    current = new Date().format("yyyyMMdd")
 
     def init() {
         super.init()
@@ -45,11 +25,70 @@ class GetperfSpec extends LinuxSpecBase {
         super.finish()
     }
 
+    def get_site_homes(session) {
+        def test_id = 'site_homes_' + ip
+        if (!Config.instance.configs.containsKey('site_homes')) {
+            def site_homes = [:]
+            def lines_site_home = exec(test_id, true) {
+                def command = "grep -H home /home/psadmin/getperf/config/site/*"
+                run_ssh_command(session, command, test_id, true)
+            }
+            lines_site_home.eachLine {
+                ( it =~ /\/site\/(.+?)\.json:\s+"home":\s+"(.+?)"/).each {
+                    m0, sitekey, site_home ->
+                    site_homes[sitekey] = site_home
+                }
+            }
+            Config.instance.configs['site_homes'] = site_homes
+        }
+        return Config.instance.configs['site_homes']
+    }
+
+    def get_last_updates(session) {
+        def site_homes = get_site_homes(session)
+        if (!Config.instance.configs.containsKey('last_updates')) {
+            def last_updates = [:].withDefault{[:]}
+            site_homes.each { sitekey, site_home ->
+                def test_id = 'node_summarys_' + sitekey
+                def lines = exec(test_id, true) {
+                    def command = "find ${site_home}/summary/  -maxdepth 3 -mindepth 3"
+                    run_ssh_command(session, command, test_id, true)
+                }
+                if (lines) {
+                    lines.eachLine { line->
+                        ( line =~ /\/summary\/(.+?)\/(.+?)\/(\d+?)$/ ).each {
+                            m0, node, domain, transfer_date->
+                            last_updates[node][domain] = transfer_date
+                        }
+                    }
+                }
+            }
+            Config.instance.configs['last_updates'] = last_updates
+        }
+        return Config.instance.configs['last_updates']
+    }
+
     def ssl_expire(session, test_item) {
         def lines = exec('ssl_expire') {
             def host_dir = (this.agent) ?: '*'
             def ssl_path = "/etc/getperf/ssl/client/*/${host_dir}/network/License.txt"
-            run_ssh_command(session, "grep -H EXPIRE ${ssl_path}", 'ssl_expire')
+            // def command = """\
+            //     |if [ -e ${ssl_path} ]; then
+            //     |   grep -H EXPIRE ${ssl_path}
+            //     |fi
+            // """.stripMargin()
+
+            def command = """\
+            |if [ -f /etc/machine-id ]; then
+            |    cat /etc/machine-id > ${work_dir}/ssl_expire
+            |elif [ -f /var/lib/dbus/machine-id ]; then
+            |    cat /var/lib/dbus/machine-id > ${work_dir}/ssl_expire
+            |fi
+            """.stripMargin()
+            session.execute command
+
+println command
+            run_ssh_command(session, command, 'ssl_expire')
         }
         def last_expired = 'Unkown'
         def csv = []
@@ -62,27 +101,26 @@ class GetperfSpec extends LinuxSpecBase {
         }
         def headers = ['Sitekey', 'AgentName', 'Expired']
         test_item.devices(csv, headers)
-        test_item.results(last_expired)
+println "${current},${last_expired}"
+        if (last_expired == 'Unkown') {
+            test_item.results("Unkown")
+        } else if (current <= last_expired) {
+            test_item.results("Not Expired")
+            test_item.verify_status(true)
+        } else {
+            test_item.results("Expired")
+            test_item.verify_status(false)
+        }
     }
 
-    def data_transfer(session, test_item) {
-        def lines_site_home = exec('site_home') {
-            def command = "grep -H home /home/psadmin/getperf/config/site/*"
-            run_ssh_command(session, command, 'site_home')
-        }
-        def site_homes = [:]
-        lines_site_home.eachLine {
-            ( it =~ /\/site\/(.+?)\.json:\s+"home":\s+"(.+?)"/).each {
-                m0, sitekey, site_home ->
-                site_homes[sitekey] = site_home
-            }
-        }
+    def analysis(session, test_item) {
+        def site_homes = get_site_homes(session)
         def last_transfer_dates = [:]
         def csv = []
-        site_homes.each { sitekey, site_home ->
-            def log_id   = "ls_analysis_${sitekey}"
-            def log_file = "${work_dir}/${log_id}"
-            def lines = exec(log_file) {
+        def lines = exec("ls_analysis") {
+            def ls_analysis = ''
+            site_homes.each { sitekey, site_home ->
+                def log_file  = "${work_dir}/ls_analysis"
                 def host_dir1 = (this.agent) ?: ''
                 def host_dir2 = (this.agent) ?: '*'
                 def command = """\
@@ -90,70 +128,36 @@ class GetperfSpec extends LinuxSpecBase {
                     |   ls ${site_home}/analysis/${host_dir2}/*/* -d
                     |fi
                 """.stripMargin()
-print command
-                def res = session.execute command
-print res
-                // session.get from: log_file, into: local_dir, ignoreError: true
-                new File("${local_dir}/${log_id}").text = res
-            }
-            lines.eachLine { line->
-                ( line =~ /\/analysis\/(.+?)\/(.+?)\/(.+?)$/ ).each {
-                    m0, hostname, domain, transfer_date->
-                    csv << [sitekey, site_home, hostname, domain, transfer_date]
-                    last_transfer_dates[domain] = transfer_date
+                def result = session.execute command, ignoreError: true
+                if (result != '') {
+                    ls_analysis += result + "\n"
                 }
             }
+            new File("${local_dir}/ls_analysis").text = ls_analysis
         }
-        def headers = ['Sitekey', 'SiteHome', 'Hostname', 'Domain', 'TransferDate']
+        lines.eachLine { line->
+            ( line =~ /\/(.+?)\/analysis\/(.+?)\/(.+?)\/(.+?)$/ ).each {
+                m0, site_home, hostname, domain, transfer_date->
+                csv << [site_home, hostname, domain, transfer_date]
+                last_transfer_dates[domain] = transfer_date
+            }
+        }
+        def headers = ['SiteHome', 'Hostname', 'Domain', 'TransferDate']
         test_item.devices(csv, headers)
+println transfer_date
         test_item.results(last_transfer_dates.toString())
     }
 
     def domain(session, test_item) {
-        def lines_site_home = exec('site_home') {
-            def command = "grep -H home /home/psadmin/getperf/config/site/*"
-            run_ssh_command(session, command, 'site_home')
-        }
-        def site_homes = [:]
-        lines_site_home.eachLine {
-            ( it =~ /\/site\/(.+?)\.json:\s+"home":\s+"(.+?)"/).each {
-                m0, sitekey, site_home ->
-                site_homes[sitekey] = site_home
+        def last_updates = get_last_updates(session)
+        if (last_updates.containsKey(this.agent)) {
+            def results = [:]
+            last_updates[this.agent].each { domain, date ->
+                results["domain.${domain}"] = date
+            test_item.results(results)
             }
+        } else {
+            test_item.results("Not Found")
         }
-        def last_transfer_dates = [:]
-        def csv = []
-        site_homes.each { sitekey, site_home ->
-            def log_file = "ls_node_${sitekey}"
-            def lines = exec(log_file) {
-                def paths = []
-                if (this.agent) {
-                    paths.add("${site_home}/node/*/${this.agent}/")
-                    def agent_uc = this.agent.toUpperCase()
-                    if (agent_uc != this.agent)
-                        paths.add("${site_home}/node/*/${agent_uc}/")
-                } else {
-                    paths.add("${site_home}/node/*/*/")
-                }
-                def command = "ls  -l -u -d --time-style=+%Y-%m-%d " + paths.join(' ')
-                command +=  ">> ${work_dir}/${log_file}"
-                session.execute command, ignoreError : true
-                session.get from: "${work_dir}/${log_file}", into: local_dir
-                new File("${local_dir}/${log_file}").text
-            }
-// drwxr-xr-x 4 psadmin cacti 4096 2016-12-05 /catai/peyok02/node/Linux/yqaj222/
-            lines.eachLine { line->
-                ( line =~ /(\d+-\d+-\d+) .+\/(.+?)\/(.+?)\/$/ ).each {
-                    m0, transfer_date, domain, node->
-                    csv << [sitekey, site_home, node, domain, transfer_date]
-                    last_transfer_dates['domain.' + domain] = transfer_date
-                }
-            }
-        }
-        def headers = ['Sitekey', 'SiteHome', 'Nodename', 'Domain', 'TransferDate']
-        test_item.devices(csv, headers)
-        last_transfer_dates['domain'] = last_transfer_dates.size()
-        test_item.results(last_transfer_dates)
     }
-
 }
