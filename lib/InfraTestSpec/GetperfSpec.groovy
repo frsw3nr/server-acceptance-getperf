@@ -44,6 +44,26 @@ class GetperfSpec extends LinuxSpecBase {
         return Config.instance.configs['site_homes']
     }
 
+    def get_ssl_expires(session) {
+        def test_id = 'ssl_expires_' + ip
+        if (!Config.instance.configs.containsKey('ssl_expires')) {
+            def ssl_expires = [:].withDefault{[:]}
+            def lines_ssl_expires = exec(test_id, true) {
+                def command = "grep -H EXPIRE `find /etc/getperf/ssl/client -name License.txt`"
+                run_ssh_command(session, command, test_id, true)
+            }
+            lines_ssl_expires.eachLine {
+                ( it =~ /\/client\/(.+?)\/(.+?)\/network\/License.txt:EXPIRE=(\d+)$/).each {
+                    m0, sitekey, agent, expire ->
+println it
+                    ssl_expires[agent] = [ expired: expire, sitekey: sitekey]
+                }
+            }
+            Config.instance.configs['ssl_expires'] = ssl_expires
+        }
+        return Config.instance.configs['ssl_expires']
+    }
+
     def get_last_updates(session) {
         def site_homes = get_site_homes(session)
         if (!Config.instance.configs.containsKey('last_updates')) {
@@ -69,48 +89,36 @@ class GetperfSpec extends LinuxSpecBase {
     }
 
     def ssl_expire(session, test_item) {
-        def lines = exec('ssl_expire') {
-            def host_dir = (this.agent) ?: '*'
-            def ssl_path = "/etc/getperf/ssl/client/*/${host_dir}/network/License.txt"
-            // def command = """\
-            //     |if [ -e ${ssl_path} ]; then
-            //     |   grep -H EXPIRE ${ssl_path}
-            //     |fi
-            // """.stripMargin()
-
-            def command = """\
-            |if [ -f /etc/machine-id ]; then
-            |    cat /etc/machine-id > ${work_dir}/ssl_expire
-            |elif [ -f /var/lib/dbus/machine-id ]; then
-            |    cat /var/lib/dbus/machine-id > ${work_dir}/ssl_expire
-            |fi
-            """.stripMargin()
-            session.execute command
-
-println command
-            run_ssh_command(session, command, 'ssl_expire')
-        }
+        def ssl_expires = get_ssl_expires(session)
+println ssl_expires
         def last_expired = 'Unkown'
         def csv = []
-        lines.eachLine {
-            ( it =~ /client\/(.+?)\/(.+?)\/network\/License\.txt:EXPIRE=(\d+)$/).each {
-                m0, sitekey, agent_name, expired->
-                last_expired = expired
-                csv << [sitekey, agent_name, expired]
+        if (this.agent) {
+            if (ssl_expires.containsKey(this.agent)) {
+                ssl_expires[this.agent].with {
+                    csv << [sitekey, this.agent, expired]
+                    last_expired = expired
+                }
             }
+            if (last_expired == 'Unkown') {
+                test_item.results("Unkown")
+            } else if (current <= last_expired) {
+                test_item.results("Not Expired")
+                test_item.verify_status(true)
+            } else {
+                test_item.results("Expired")
+                test_item.verify_status(false)
+            }
+        } else {
+            ssl_expires.each { agentname, ssl_expire ->
+                ssl_expire.with {
+                    csv << [sitekey, agentname, expired]
+                }
+            }
+            test_item.results("Check sheet 'getperf_ssl_expire'")
         }
         def headers = ['Sitekey', 'AgentName', 'Expired']
         test_item.devices(csv, headers)
-println "${current},${last_expired}"
-        if (last_expired == 'Unkown') {
-            test_item.results("Unkown")
-        } else if (current <= last_expired) {
-            test_item.results("Not Expired")
-            test_item.verify_status(true)
-        } else {
-            test_item.results("Expired")
-            test_item.verify_status(false)
-        }
     }
 
     def analysis(session, test_item) {
@@ -147,6 +155,16 @@ println "${current},${last_expired}"
 println transfer_date
         test_item.results(last_transfer_dates.toString())
     }
+
+// リモートノードの場合
+
+// find ~/site/site1/summary/ostrich/HTTP/
+
+// /home/psadmin/site/site1/summary/ostrich/HTTP/20161209/045000/HTTP/192.168.10.1/device
+// /home/psadmin/site/site1/summary/ostrich/HTTP/20161209/045000/HTTP/192.168.10.1/device/http_response__getperf_ws_data.txt
+// /home/psadmin/site/site1/summary/ostrich/HTTP/20161209/045000/HTTP/192.168.10.1/device/http_response__getperf_ws_admin.txt
+
+// /home/psadmin/site/site1/summary/ostrich/HTTP/20161209/045000
 
     def domain(session, test_item) {
         def last_updates = get_last_updates(session)
