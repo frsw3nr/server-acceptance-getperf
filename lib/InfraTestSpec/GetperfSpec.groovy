@@ -55,7 +55,6 @@ class GetperfSpec extends LinuxSpecBase {
             lines_ssl_expires.eachLine {
                 ( it =~ /\/client\/(.+?)\/(.+?)\/network\/License.txt:EXPIRE=(\d+)$/).each {
                     m0, sitekey, agent, expire ->
-println it
                     ssl_expires[agent] = [ expired: expire, sitekey: sitekey]
                 }
             }
@@ -71,14 +70,22 @@ println it
             site_homes.each { sitekey, site_home ->
                 def test_id = 'node_summarys_' + sitekey
                 def lines = exec(test_id, true) {
-                    def command = "find ${site_home}/summary/  -maxdepth 3 -mindepth 3"
+                    def command = "find ${site_home}/summary/  -maxdepth 4 | sort"
                     run_ssh_command(session, command, test_id, true)
                 }
                 if (lines) {
+                    def base_key = ''
                     lines.eachLine { line->
-                        ( line =~ /\/summary\/(.+?)\/(.+?)\/(\d+?)$/ ).each {
-                            m0, node, domain, transfer_date->
-                            last_updates[node][domain] = transfer_date
+                        ( line =~ /\/summary\/(.+?)\/(.+?)\/(\d+?)\/(\d+?)$/ ).each {
+                            m0, node, domain, date, time->
+                            def key = "$node,$domain,$date"
+                            if (base_key != key) {
+                                last_updates[node][domain] = [
+                                    path: "$site_home/summary/$node/$domain/$date/$time",
+                                    date: date
+                                ]
+                                base_key = key
+                            }
                         }
                     }
                 }
@@ -88,9 +95,40 @@ println it
         return Config.instance.configs['last_updates']
     }
 
+    def get_last_updates_with_remote(session) {
+        def last_updates = get_last_updates(session)
+        if (!Config.instance.configs.containsKey('last_updates_with_remote')) {
+            def last_transfer_dates = [:].withDefault{[:]}
+            last_updates.each { agent, domain_tags ->
+                domain_tags.each { domain, summary_tags ->
+                    def path = summary_tags.path
+                    def date = summary_tags.date
+                    def lines = exec("domain") {
+                        def command = "find ${path} -maxdepth 2"
+                        run_ssh_command(session, command, "domain")
+                    }
+                    def remote_domains = [:].withDefault{[:]}
+                    lines.eachLine { line->
+                        (line =~ /\/summary\/(.+?)\/(.+?)\/(\d+)\/(\d+)\/(.+?)\/(.+?)\//).each {
+                            m0, remote, domain2, date2, time2, remote_domain, remote_node ->
+                            if (remote_domain != 'device') {
+                                last_transfer_dates[remote_node][remote_domain] = date
+                            }
+                        }
+                    }
+                    if (remote_domains.size() == 0) {
+                        last_transfer_dates[agent][domain] = date
+                    }
+                    // results["domain.${domain}"] = date
+                }
+            }
+            Config.instance.configs['last_updates_with_remote'] = last_transfer_dates
+        }
+        return Config.instance.configs['last_updates_with_remote']
+    }
+
     def ssl_expire(session, test_item) {
         def ssl_expires = get_ssl_expires(session)
-println ssl_expires
         def last_expired = 'Unkown'
         def csv = []
         if (this.agent) {
@@ -123,7 +161,7 @@ println ssl_expires
 
     def analysis(session, test_item) {
         def site_homes = get_site_homes(session)
-        def last_transfer_dates = [:]
+        def last_transfer_date = 'Unkown'
         def csv = []
         def lines = exec("ls_analysis") {
             def ls_analysis = ''
@@ -147,35 +185,54 @@ println ssl_expires
             ( line =~ /\/(.+?)\/analysis\/(.+?)\/(.+?)\/(.+?)$/ ).each {
                 m0, site_home, hostname, domain, transfer_date->
                 csv << [site_home, hostname, domain, transfer_date]
-                last_transfer_dates[domain] = transfer_date
+                last_transfer_date = transfer_date
             }
         }
         def headers = ['SiteHome', 'Hostname', 'Domain', 'TransferDate']
         test_item.devices(csv, headers)
-println transfer_date
-        test_item.results(last_transfer_dates.toString())
+        if (last_transfer_date == 'Unkown') {
+            results['domain'] = "Unkown"
+        } else if (current <= last_transfer_date) {
+            test_item.results("Transferred")
+            test_item.verify_status(true)
+        } else {
+            test_item.results("Not Transferred")
+            test_item.verify_status(false)
+        }
     }
 
-// リモートノードの場合
-
-// find ~/site/site1/summary/ostrich/HTTP/
-
-// /home/psadmin/site/site1/summary/ostrich/HTTP/20161209/045000/HTTP/192.168.10.1/device
-// /home/psadmin/site/site1/summary/ostrich/HTTP/20161209/045000/HTTP/192.168.10.1/device/http_response__getperf_ws_data.txt
-// /home/psadmin/site/site1/summary/ostrich/HTTP/20161209/045000/HTTP/192.168.10.1/device/http_response__getperf_ws_admin.txt
-
-// /home/psadmin/site/site1/summary/ostrich/HTTP/20161209/045000
-
     def domain(session, test_item) {
-        def last_updates = get_last_updates(session)
-        if (last_updates.containsKey(this.agent)) {
-            def results = [:]
-            last_updates[this.agent].each { domain, date ->
-                results["domain.${domain}"] = date
-            test_item.results(results)
+        def last_updates = get_last_updates_with_remote(session)
+        def update_date = 'Unkown'
+        def results = [:]
+        def csv = []
+        if (this.agent) {
+            if (last_updates.containsKey(this.agent)) {
+                last_updates[this.agent].each { domain, last_update ->
+                    csv << [this.agent, domain, last_update]
+                    results["domain.${domain}"] = last_update
+                    update_date = last_update
+                }
+            }
+            if (update_date == 'Unkown') {
+                results['domain'] = "Unkown"
+            } else if (current <= update_date) {
+                results['domain'] = "Updated"
+                test_item.verify_status(true)
+            } else {
+                results['domain'] = "Not Updated"
+                test_item.verify_status(false)
             }
         } else {
-            test_item.results("Not Found")
+            last_updates.each { host, domain_updates ->
+                domain_updates.each {domain, last_update ->
+                    csv << [host, domain, last_update]
+                }
+            }
+            test_item.results("Check sheet 'getperf_domain'")
         }
+        def headers = ['Host', 'Domain', 'LastUpdate']
+        test_item.devices(csv, headers)
+        test_item.results(results)
     }
 }
