@@ -29,7 +29,7 @@ class GetperfSpec extends LinuxSpecBase {
         def test_id = 'site_homes_' + ip
         if (!Config.instance.configs.containsKey('site_homes')) {
             def site_homes = [:]
-            def lines_site_home = exec(test_id, true) {
+            def lines_site_home = exec(test_id, shared: true) {
                 def command = "grep -H home /home/psadmin/getperf/config/site/*"
                 run_ssh_command(session, command, test_id, true)
             }
@@ -48,7 +48,7 @@ class GetperfSpec extends LinuxSpecBase {
         def test_id = 'ssl_expires_' + ip
         if (!Config.instance.configs.containsKey('ssl_expires')) {
             def ssl_expires = [:].withDefault{[:]}
-            def lines_ssl_expires = exec(test_id, true) {
+            def lines_ssl_expires = exec(test_id, shared: true) {
                 def command = "grep -H EXPIRE `find /etc/getperf/ssl/client -name License.txt`"
                 run_ssh_command(session, command, test_id, true)
             }
@@ -69,8 +69,12 @@ class GetperfSpec extends LinuxSpecBase {
             def last_updates = [:].withDefault{[:]}
             site_homes.each { sitekey, site_home ->
                 def test_id = 'node_summarys_' + sitekey
-                def lines = exec(test_id, true) {
-                    def command = "find ${site_home}/summary/  -maxdepth 4 | sort"
+                def lines = exec(test_id, shared: true) {
+                    def command = """\
+                    |if [ -d ${site_home}/summary/ ]; then
+                    |    find ${site_home}/summary/  -maxdepth 4 | sort
+                    |fi
+                    """.stripMargin()
                     run_ssh_command(session, command, test_id, true)
                 }
                 if (lines) {
@@ -104,7 +108,11 @@ class GetperfSpec extends LinuxSpecBase {
                     def path = summary_tags.path
                     def date = summary_tags.date
                     def lines = exec("domain") {
-                        def command = "find ${path} -maxdepth 2"
+                        def command = """\
+                        |if [ -d ${path} ]; then
+                        |    find ${path}  -maxdepth 2
+                        |fi
+                        """.stripMargin()
                         run_ssh_command(session, command, "domain")
                     }
                     def remote_domains = [:].withDefault{[:]}
@@ -191,7 +199,7 @@ class GetperfSpec extends LinuxSpecBase {
         def headers = ['SiteHome', 'Hostname', 'Domain', 'TransferDate']
         test_item.devices(csv, headers)
         if (last_transfer_date == 'Unkown') {
-            results['domain'] = "Unkown"
+            test_item.results("Unkown")
         } else if (current <= last_transfer_date) {
             test_item.results("Transferred")
             test_item.verify_status(true)
@@ -205,12 +213,20 @@ class GetperfSpec extends LinuxSpecBase {
         def last_updates = get_last_updates_with_remote(session)
         def update_date = 'Unkown'
         def results = [:]
+        def verifys = [:]
         def csv = []
         if (this.agent) {
             if (last_updates.containsKey(this.agent)) {
                 last_updates[this.agent].each { domain, last_update ->
                     csv << [this.agent, domain, last_update]
-                    results["domain.${domain}"] = last_update
+                    def id = "domain.${domain}"
+                    if (current <= update_date) {
+                        results[id] = "Updated"
+                        verifys[id] = true
+                    } else {
+                        results[id] = "Not Updated"
+                        verifys[id] = false
+                    }
                     update_date = last_update
                 }
             }
@@ -218,10 +234,10 @@ class GetperfSpec extends LinuxSpecBase {
                 results['domain'] = "Unkown"
             } else if (current <= update_date) {
                 results['domain'] = "Updated"
-                test_item.verify_status(true)
+                verifys['domain'] = true
             } else {
                 results['domain'] = "Not Updated"
-                test_item.verify_status(false)
+                verifys['domain'] = false
             }
         } else {
             last_updates.each { host, domain_updates ->
@@ -229,10 +245,11 @@ class GetperfSpec extends LinuxSpecBase {
                     csv << [host, domain, last_update]
                 }
             }
-            test_item.results("Check sheet 'getperf_domain'")
+            test_item.results("Check 'getperf_domain'")
         }
         def headers = ['Host', 'Domain', 'LastUpdate']
         test_item.devices(csv, headers)
         test_item.results(results)
+        test_item.verify_status(verifys)
     }
 }
